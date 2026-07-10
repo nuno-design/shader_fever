@@ -297,7 +297,17 @@ void main() {
 
   // ---------- controls ----------
 
-  for (const def of SHADERS) {
+  // dropdown display order (ids not listed keep their definition order, up front)
+  const SHADER_ORDER = [
+    "plasma", "cascade", "topography", "nebula", "dither", "dotwave",
+    "dotmap", "julia", "glassorb", "ribbons", "kaleido",
+  ];
+  const orderedShaders = [...SHADERS].sort((a, b) => {
+    const ia = SHADER_ORDER.indexOf(a.id), ib = SHADER_ORDER.indexOf(b.id);
+    return (ia < 0 ? -1 : ia) - (ib < 0 ? -1 : ib);
+  });
+
+  for (const def of orderedShaders) {
     const opt = document.createElement("option");
     opt.value = def.id;
     opt.textContent = def.name;
@@ -348,17 +358,56 @@ void main() {
   });
 
   const copyBtn = $("btn-copy");
+  const copyMenu = $("copy-menu");
   copyBtn.innerHTML = ICONS.copy;
   let copyTimer = null;
-  copyBtn.addEventListener("click", async () => {
+
+  const closeMenu = () => { copyMenu.hidden = true; };
+  copyBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    copyMenu.hidden = !copyMenu.hidden;
+  });
+  document.addEventListener("click", closeMenu);
+  copyMenu.addEventListener("click", (e) => e.stopPropagation());
+
+  function flashCopied() {
+    copyBtn.innerHTML = ICONS.check;
+    clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => { copyBtn.innerHTML = ICONS.copy; }, 1200);
+  }
+
+  async function copyCode() {
     try {
       await navigator.clipboard.writeText(HEADER + current.def.frag.trim() + "\n");
-      copyBtn.innerHTML = ICONS.check;
-      clearTimeout(copyTimer);
-      copyTimer = setTimeout(() => { copyBtn.innerHTML = ICONS.copy; }, 1200);
+      flashCopied();
+    } catch { copyBtn.title = "Clipboard unavailable"; }
+  }
+
+  async function copyPNG() {
+    // redraw synchronously so the frame is in the buffer when toBlob reads it
+    drawScene();
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+    if (!blob) return;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      flashCopied();
     } catch {
-      copyBtn.title = "Clipboard unavailable";
+      // fallback: download it if clipboard-image isn't permitted
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = current.def.id + ".png";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      flashCopied();
     }
+  }
+
+  copyMenu.addEventListener("click", (e) => {
+    const kind = e.target.dataset.copy;
+    if (!kind) return;
+    closeMenu();
+    if (kind === "code") copyCode();
+    else copyPNG();
   });
 
   $("btn-collapse").addEventListener("click", () => document.body.classList.add("collapsed"));
@@ -394,19 +443,7 @@ void main() {
 
   const statFps = $("stat-fps");
 
-  function frame(now) {
-    const dt = Math.min((now - lastFrame) / 1000, 0.1);
-    lastFrame = now;
-    if (playing) time += dt;
-
-    // fps readout (updated twice a second)
-    fpsAccum += dt;
-    fpsFrames++;
-    if (now - fpsLast > 500) {
-      statFps.textContent = `${Math.round(fpsFrames / fpsAccum)} FPS`;
-      fpsAccum = 0; fpsFrames = 0; fpsLast = now;
-    }
-
+  function drawScene() {
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.useProgram(current.program);
     gl.uniform1f(current.locations.u_time, time);
@@ -446,6 +483,22 @@ void main() {
     }
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  function frame(now) {
+    const dt = Math.min((now - lastFrame) / 1000, 0.1);
+    lastFrame = now;
+    if (playing) time += dt;
+
+    // fps readout (updated twice a second)
+    fpsAccum += dt;
+    fpsFrames++;
+    if (now - fpsLast > 500) {
+      statFps.textContent = `${Math.round(fpsFrames / fpsAccum)} FPS`;
+      fpsAccum = 0; fpsFrames = 0; fpsLast = now;
+    }
+
+    drawScene();
     requestAnimationFrame(frame);
   }
 

@@ -459,8 +459,8 @@ void main() {
       { key: "u_hover",   label: "Hover Radius", type: "range",  min: 0.05, max: 0.6, step: 0.01, value: 0.12 },
       { key: "u_twinkle", label: "Accents",      type: "range",  min: 0,    max: 1,   step: 0.01, value: 0.22 },
       { key: "u_speed",   label: "Speed",        type: "range",  min: 0,    max: 2,   step: 0.01, value: 1.32 },
+      { key: "u_wave",    label: "Wave Scale",   type: "range",  min: 0.5,  max: 4,   step: 0.01, value: 1.5 },
       { key: "u_bg",      label: "Background",   type: "color", value: "#2800b8" },
-      { key: "u_dotc",    label: "Dot Color",    type: "color", value: "#5a4efd" },
       // this shader ships its own ramp defaults (glow tones over indigo)
       { key: "u_c0", label: "Stop 1", type: "color", value: "#f9ffdb" },
       { key: "u_c1", label: "Stop 2", type: "color", value: "#ffc9b3" },
@@ -470,10 +470,20 @@ void main() {
       { key: "u_c5", label: "Stop 6", type: "color", value: "#f9e6c3" },
     ],
     frag: RAMP_GLSL + NOISE_LIB + MAP_GLSL + `
-uniform float u_grid, u_dot, u_hover, u_twinkle, u_speed, u_hoverOn;
-uniform vec3 u_bg, u_dotc;
+uniform float u_grid, u_dot, u_hover, u_twinkle, u_speed, u_wave, u_hoverOn;
+uniform vec3 u_bg;
 uniform vec2 u_mouse;
-uniform vec3 u_clicks[4]; // (x, y, time) of recent clicks
+uniform vec3 u_clicks[4];
+
+float waveField(vec2 p, float t) {
+  float w = 0.0;
+  w += sin(p.x * 3.1 * u_wave + t * 1.7);
+  w += sin((p.x * 0.6 + p.y * 1.4) * 2.3 * u_wave - t * 1.3);
+  w += sin(length(p + vec2(sin(t * 0.3), cos(t * 0.4))) * 4.0 * u_wave - t * 2.0);
+  w = w / 3.0 * 0.5 + 0.5;
+  w += (vnoise(p * 2.0 * u_wave + t * 0.5) - 0.5) * 0.25;
+  return clamp(w, 0.0, 1.0);
+}
 
 void main() {
   float t = u_time * u_speed;
@@ -492,12 +502,16 @@ void main() {
   float land = mapBilinear(vec2(muv.x * 64.0, (1.0 - muv.y) * 32.0));
 
   if (land > 0.42 && muv.x >= 0.0 && muv.x <= 1.0 && muv.y >= 0.0 && muv.y <= 1.0) {
-    // hover bloom: closest dots take the vivid end of the ramp
+    // wave field in screen-space (same coordinate scale as Dot Wave)
+    vec2 pp = (2.0 * stc - 1.0) * vec2(u_resolution.x / u_resolution.y, 1.0);
+    float w = waveField(pp, t);
+
+    // hover bloom
     vec2 cpx = (cell + 0.5) * px;
     float dm = length((cpx - u_mouse) / u_resolution.y);
     float h = smoothstep(u_hover, u_hover * 0.15, dm) * u_hoverOn;
 
-    // click pulses: rings dispersing outward, fading as they travel
+    // click pulses
     float pulse = 0.0;
     for (int i = 0; i < 4; i++) {
       float age = u_time - u_clicks[i].z;
@@ -508,22 +522,23 @@ void main() {
       pulse = max(pulse, ring * exp(-age * 1.3));
     }
 
-    // slow accent twinkles scattered across the map
+    // accent twinkles
     vec2 rr = hash2(cell * 1.31 + 7.7);
     float tw = step(rr.x, 0.05 * u_twinkle)
              * max(sin(6.2831 * (t * 0.25 + rr.y * 13.0)), 0.0);
 
-    vec3 dotc = u_dotc;
-    dotc = mix(dotc, ramp(0.12), tw);
-    dotc = mix(dotc, ramp(clamp(0.05 + 0.55 * dm / u_hover, 0.0, 1.0)), h);
-    dotc = mix(dotc, ramp(0.10), pulse);
-
-    // rounded-square dot, swelling under the cursor and the pulse ring
+    // ramp position: wave drives base, hover/pulse/twinkle push toward vivid end
     float boost = max(h, pulse);
+    float rampT = w * 0.65;
+    rampT = mix(rampT, 0.95, tw);
+    rampT = mix(rampT, 1.0, boost);
+    vec3 dotc = ramp(rampT);
+
+    // dot size: wave drives breathing, hover/pulse swell it further
     vec2 g = abs(f - 0.5);
     float dd = mix(max(g.x, g.y), length(g), 0.25);
-    float size = 0.5 * u_dot * (1.0 + 0.30 * boost) * 0.72;
-    col = mix(col, dotc, smoothstep(size, size - 0.08, dd));
+    float r = 0.5 * u_dot * (0.15 + 0.85 * w) * (1.0 + 0.35 * boost);
+    col = mix(col, dotc, 1.0 - smoothstep(r - 0.05, r + 0.05, dd));
   }
 
   fragColor = vec4(col, 1.0);
@@ -721,6 +736,103 @@ void main() {
     col = ramp(0.5 - 0.5 * cos(6.2831 * m * 1.2));
     col += u_c5 * pow(m, 8.0) * 0.3;
   }
+
+  fragColor = vec4(col, 1.0);
+}`,
+  },
+
+  // ------------------------------------------------------------ cascade
+  {
+    id: "cascade",
+    name: "Cascade",
+    desc: "Sunset gradient behind staggered glass panes — mirrored columns each hold the sky at a different height, finished with film grain.",
+    params: [
+      { key: "u_cols",    label: "Columns", type: "range", min: 3,    max: 18,  step: 1,    value: 15 },
+      { key: "u_amp",     label: "Amplitude", type: "range", min: 0,  max: 0.4, step: 0.01, value: 0.30 },
+      { key: "u_waves",   label: "Waves",   type: "range", min: 0.5,  max: 4,   step: 0.01, value: 1.65 },
+      { key: "u_band",    label: "Cloud Band", type: "range", min: 0, max: 0.6, step: 0.01, value: 0.50 },
+      { key: "u_speed",   label: "Speed",   type: "range", min: 0,    max: 2,   step: 0.01, value: 0.32 },
+      ...RAMP_PARAMS,
+    ],
+    frag: RAMP_GLSL + NOISE_LIB + `
+uniform float u_cols, u_amp, u_waves, u_band, u_speed;
+
+void main() {
+  vec2 st = gl_FragCoord.xy / u_resolution; // 0..1, y up
+  float t = u_time * u_speed;
+
+  // N strictly equal-width columns
+  float n = max(u_cols, 1.0);
+  float k = floor(clamp(st.x, 0.0, 0.99999) * n); // column index 0..n-1
+  float phase = (k + 0.5) / n;                     // column center, 0..1
+
+  // traveling wave: the horizon height per column rides a sine that
+  // scrolls left -> right over time. Same value for the whole column,
+  // so every column keeps equal width; only its bright band moves.
+  float horizon = 0.5 + u_amp * sin(6.2831 * (phase * u_waves - t * 0.35));
+  float y = st.y;
+
+  // sunset profile, all sampled from the ramp:
+  // cream bloom at the (per-column) horizon, indigo cloud band above,
+  // periwinkle settling below
+  float tR = 0.40
+           + 0.66 * exp(-pow((y - horizon) * 4.2, 2.0))            // horizon glow
+           - u_band * exp(-pow((y - (horizon + 0.30)) * 4.0, 2.0)) // cloud band above
+           - 0.14 * clamp((horizon - 0.16 - y) * 2.5, 0.0, 1.0);   // settle below
+  vec3 col = ramp(clamp(tR, 0.0, 1.0));
+
+  fragColor = vec4(col, 1.0);
+}`,
+  },
+
+  // ------------------------------------------------------------ topography
+  {
+    id: "topography",
+    name: "Topographic",
+    desc: "Elevation contour lines of a domain-warped terrain field — isolines bunch tight on steep slopes and open up on plains, like a printed topo map.",
+    params: [
+      { key: "u_scale",  label: "Feature Size", type: "range", min: 0.3, max: 3,   step: 0.01, value: 3.0 },
+      { key: "u_lines",  label: "Contours",  type: "range", min: 6,   max: 60,  step: 1,    value: 49 },
+      { key: "u_warp",   label: "Warp",      type: "range", min: 0,   max: 2.5, step: 0.01, value: 0.78 },
+      { key: "u_detail", label: "Detail",    type: "range", min: 0,   max: 1,   step: 0.01, value: 0.65 },
+      { key: "u_thick",  label: "Thickness", type: "range", min: 0.5, max: 3,   step: 0.01, value: 1.59 },
+      { key: "u_speed",  label: "Speed",     type: "range", min: 0,   max: 1,   step: 0.01, value: 0.06 },
+      { key: "u_bg",     label: "Background", type: "color", value: "#1c34d8" },
+      ...RAMP_PARAMS,
+    ],
+    frag: RAMP_GLSL + NOISE_LIB + `
+uniform float u_scale, u_lines, u_warp, u_detail, u_thick, u_speed;
+uniform vec3 u_bg;
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy * 2.0 - u_resolution) / u_resolution.y;
+  float t = u_time * u_speed;
+
+  // low-frequency-dominant terrain: a few big massifs, gentle warp,
+  // then a controllable amount of fine ridge detail on top
+  vec2 q = uv * u_scale;
+  vec2 wv = u_warp * (vec2(vnoise(q * 0.6 + vec2(0.0, t)),
+                           vnoise(q * 0.6 + vec2(9.0, -t) + 4.0)) - 0.5);
+  q += wv;
+  float h = 0.66 * vnoise(q * 0.55)
+          + 0.26 * vnoise(q * 1.15 + 3.3)
+          + u_detail * (0.18 * vnoise(q * 2.6 + 8.1)
+                      + 0.09 * vnoise(q * 4.9 + 1.7));
+
+  // constant-width isolines via screen-space derivative; contour spacing
+  // shrinks where the slope is steep, so lines crowd around peaks/ridges
+  float f = h * u_lines;
+  float e = abs(fract(f) - 0.5);          // 0 at a contour, 0.5 between
+  float lw = fwidth(f) * u_thick;
+  float line = 1.0 - smoothstep(0.0, lw, e);
+
+  // soft diagonal key light, brighter toward the top-right
+  float lightBg = 0.15 + 0.22 * clamp(0.5 + 0.5 * (uv.x * 0.4 + uv.y * 0.8), 0.0, 1.0);
+  vec3 col = mix(u_bg, ramp(0.35), lightBg);
+
+  // line color tinted by elevation: pale periwinkle low, cream on the peaks
+  vec3 lc = ramp(mix(0.72, 1.0, clamp(h * 0.5 + 0.5, 0.0, 1.0)));
+  col = mix(col, lc, line * 0.85);
 
   fragColor = vec4(col, 1.0);
 }`,
