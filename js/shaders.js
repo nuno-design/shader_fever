@@ -838,6 +838,113 @@ void main() {
 }`,
   },
 
+  // ------------------------------------------------------------ terrain (3D)
+  {
+    id: "terrain",
+    name: "Terrain",
+    desc: "A raymarched 3D heightfield seen in perspective — glowing contour lines drape real mountains, fading into fog with depth-of-field blur.",
+    params: [
+      { key: "u_scale",  label: "Feature Size", type: "range", min: 0.4, max: 2.5, step: 0.01, value: 2.23 },
+      { key: "u_height", label: "Relief",    type: "range", min: 0.2, max: 1.6, step: 0.01, value: 0.86 },
+      { key: "u_lines",  label: "Contours",  type: "range", min: 8,   max: 60,  step: 1,    value: 50 },
+      { key: "u_detail", label: "Detail",    type: "range", min: 0,   max: 1,   step: 0.01, value: 0.47 },
+      { key: "u_orbit",  label: "Orbit",     type: "range", min: 0,   max: 6.28, step: 0.01, value: 0.8 },
+      { key: "u_pitch",  label: "Camera Angle", type: "range", min: 0.25, max: 1.35, step: 0.01, value: 0.42 },
+      { key: "u_dist",   label: "Distance",  type: "range", min: 1.5, max: 6,   step: 0.01, value: 3.2 },
+      { key: "u_focus",  label: "Focus",     type: "range", min: 1,   max: 8,   step: 0.1,  value: 3.0 },
+      { key: "u_dof",    label: "Blur",      type: "range", min: 0,   max: 1,   step: 0.01, value: 0.35 },
+      { key: "u_speed",  label: "Flow",      type: "range", min: 0,   max: 1,   step: 0.01, value: 0.2 },
+      { key: "u_bg",     label: "Background", type: "color", value: "#2c2cc9" },
+      ...RAMP_PARAMS,
+    ],
+    frag: RAMP_GLSL + NOISE_LIB + `
+uniform float u_scale, u_height, u_lines, u_detail, u_orbit, u_pitch, u_dist, u_focus, u_dof, u_speed;
+uniform vec3 u_bg;
+
+float T; // animation clock — the terrain itself evolves, not the camera
+
+float terrain(vec2 p) {
+  vec2 q = p * u_scale * 0.35;
+  // each noise layer drifts at its own rate, so the contours writhe and
+  // morph over the fixed centerpiece
+  float h = 0.55 * vnoise(q * 0.55 + vec2(T * 0.15, -T * 0.09))
+          + 0.27 * vnoise(q * 1.15 + 3.3 + vec2(-T * 0.11, T * 0.13))
+          + u_detail * (0.14 * vnoise(q * 2.6 + 8.1 + T * 0.2)
+                      + 0.07 * vnoise(q * 5.0 + 1.7 - T * 0.16));
+  // sculpted centerpiece: broad massif with a sunken bowl -> concentric rings,
+  // enclosed by a rising rim so the camera always sits inside terrain
+  float r = length(p);
+  h += 0.65 * exp(-r * r * 0.18);
+  h -= 0.38 * exp(-r * r * 1.4);
+  h += 1.15 * smoothstep(2.4, 6.0, r);
+  return h * u_height;
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy * 2.0 - u_resolution) / u_resolution.y;
+  T = u_time * u_speed;
+
+  // fixed camera on an orbit rig: yaw/pitch/distance are all manual —
+  // the motion comes from the terrain flowing, not the camera
+  float yaw = u_orbit;
+  vec3 ta = vec3(0.0, 0.45, 0.0);
+  vec3 ro = ta + u_dist * vec3(cos(u_pitch) * sin(yaw), sin(u_pitch), cos(u_pitch) * cos(yaw));
+  ro.y = max(ro.y, terrain(ro.xz) + 0.3);   // never sink into a ridge
+  vec3 fw = normalize(ta - ro);
+  vec3 rt = normalize(cross(vec3(0.0, 1.0, 0.0), fw));
+  vec3 up = cross(fw, rt);
+  vec3 rd = normalize(uv.x * rt + uv.y * up + 1.6 * fw);
+
+  // raymarch the heightfield: advance until the ray dips below the surface
+  float d = 0.15, pT = 0.1, pDiff = 1.0, hitT = -1.0;
+  for (int i = 0; i < 130; i++) {
+    vec3 p = ro + rd * d;
+    float diff = p.y - terrain(p.xz);
+    if (diff < 0.0) {                       // crossed the surface
+      hitT = mix(pT, d, pDiff / (pDiff - diff)); // zero-crossing lerp
+      break;
+    }
+    pT = d; pDiff = diff;
+    d += 0.026 * d + 0.010;
+    if (d > 20.0) break;
+  }
+
+  vec3 col = mix(u_bg, u_bg * 2.2, clamp(uv.y * 0.5 + 0.4, 0.0, 1.0)); // faint sky
+
+  if (hitT > 0.0) {
+    vec3 p = ro + rd * hitT;
+    float H = terrain(p.xz);
+
+    // surface normal for a faint sense of form
+    vec2 e = vec2(0.02, 0.0);
+    vec3 nor = normalize(vec3(terrain(p.xz - e.xy) - terrain(p.xz + e.xy),
+                              2.0 * e.x,
+                              terrain(p.xz - e.yx) - terrain(p.xz + e.yx)));
+    float dif = clamp(dot(nor, normalize(vec3(0.5, 0.8, -0.4))), 0.0, 1.0);
+
+    // contour lines, widened by depth-of-field away from the focal distance
+    float f = H * u_lines;
+    float g = abs(fract(f) - 0.5);
+    float blur = u_dof * 0.35 * abs(hitT - u_focus);
+    float lw = clamp(fwidth(f) * 1.2, 0.0, 0.32) + blur;
+    float line = (1.0 - smoothstep(0.0, lw, g)) / (1.0 + blur * 3.0); // blur softens
+
+    // fog fading into the background with distance (tuned to orbit scale)
+    float fog = exp(-max(hitT - u_dist * 0.55, 0.0) * 0.30);
+
+    vec3 sky = mix(u_bg, u_bg * 2.2, clamp(uv.y * 0.5 + 0.4, 0.0, 1.0));
+    vec3 surf = u_bg * (0.5 + 0.6 * dif);
+    vec3 lc = mix(vec3(1.0), ramp(0.9), 0.28);   // near-white lines, faint ramp tint
+    col = surf + lc * line * 1.7 * (0.55 + 0.45 * dif);
+    col = mix(sky, col, fog);
+    // soft edge vignette — corners sink toward the background like the reference
+    col = mix(u_bg, col, 1.0 - 0.55 * pow(length(uv * vec2(0.62, 1.0)), 2.2));
+  }
+
+  fragColor = vec4(col, 1.0);
+}`,
+  },
+
   // ------------------------------------------------------------ kaleido
   {
     id: "kaleido",

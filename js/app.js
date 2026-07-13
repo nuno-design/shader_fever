@@ -299,7 +299,7 @@ void main() {
 
   // dropdown display order (ids not listed keep their definition order, up front)
   const SHADER_ORDER = [
-    "plasma", "cascade", "topography", "nebula", "dither", "dotwave",
+    "plasma", "cascade", "topography", "terrain", "nebula", "dither", "dotwave",
     "dotmap", "julia", "glassorb", "ribbons", "kaleido",
   ];
   const orderedShaders = [...SHADERS].sort((a, b) => {
